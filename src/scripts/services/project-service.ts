@@ -1,13 +1,13 @@
-import * as TE from 'fp-ts/lib/TaskEither';
-import * as E from 'fp-ts/lib/Either';
-import * as O from 'fp-ts/lib/Option';
+import * as RTE from 'fp-ts/ReaderTaskEither';
+import * as E from 'fp-ts/Either';
+import * as O from 'fp-ts/Option';
 import * as T from 'io-ts';
-import { PathReporter } from 'io-ts/lib/PathReporter';
+import { PathReporter } from 'io-ts/PathReporter';
 
-import JiraAPI from 'jira-client';
-import { pipe } from 'fp-ts/lib/function';
+import { pipe } from 'fp-ts/function';
 import { chainableError } from './error-service';
-import { JiraErrorResponse, makeRequest } from './client-service';
+import { ClientEnv, JiraErrorResponse, makeRequest } from './client-service';
+import { progressify, ProgressReporterEnv } from './progress-service';
 
 const JiraUser = T.readonly(
   T.type({
@@ -17,16 +17,24 @@ const JiraUser = T.readonly(
   })
 );
 
-const JiraProject = T.readonly(
+const JiraProjectSummary = T.readonly(
   T.type({
     self: T.string,
     name: T.string,
     id: T.string,
-    lead: JiraUser,
     projectTypeKey: T.string,
     key: T.string,
   })
 );
+
+const JiraProject = T.intersection([
+  JiraProjectSummary,
+  T.readonly(
+    T.type({
+      lead: JiraUser,
+    })
+  ),
+]);
 
 type JiraProject = T.TypeOf<typeof JiraProject>;
 
@@ -96,6 +104,58 @@ type ProjectGroupRole = {
   readonly groups: readonly JiraGroup[];
 };
 
+export const BoardSummary = T.readonly(
+  T.type({
+    id: T.number,
+    name: T.string,
+  })
+);
+
+export type BoardSummary = T.TypeOf<typeof BoardSummary>;
+
+export const BoardConfiguration = T.readonly(
+  T.type({
+    id: T.number,
+    name: T.string,
+    type: T.string,
+    filter: T.readonly(
+      T.partial({
+        id: T.string,
+        self: T.string,
+      })
+    ),
+  })
+);
+
+export type BoardConfiguration = T.TypeOf<typeof BoardConfiguration>;
+
+export const FilterConfiguration = T.readonly(
+  T.type({
+    id: T.string,
+    name: T.string,
+    jql: T.string,
+    sharePermissions: T.readonlyArray(
+      T.readonly(
+        T.type({
+          id: T.number,
+          type: T.literal('project'),
+          project: JiraProjectSummary,
+        })
+      )
+    ),
+  })
+);
+
+export type FilterConfiguration = T.TypeOf<typeof FilterConfiguration>;
+
+export const BoardSummaryResponse = T.readonly(
+  T.type({
+    values: T.readonlyArray(BoardSummary),
+  })
+);
+
+export type BoardSummaryResponse = T.TypeOf<typeof BoardSummaryResponse>;
+
 export type Project = {
   readonly id: string;
   readonly key: string;
@@ -103,6 +163,23 @@ export type Project = {
     readonly displayName: string;
   };
   readonly groupRoles: readonly ProjectGroupRole[];
+};
+
+export type Filter = {
+  readonly id: string;
+  readonly jql: string;
+  readonly sharePermissions: readonly {
+    readonly project: {
+      readonly id: string;
+    };
+  }[];
+};
+
+export type ProjectBoard = {
+  readonly filter?: Filter;
+  readonly id: number;
+  readonly name: string;
+  readonly type: string;
 };
 
 // eslint-disable-next-line functional/no-class
@@ -140,7 +217,7 @@ const mapValidationError = <T>(
  */
 const decode =
   <I, O>(
-    message: (errors: readonly string[]) => string,
+    message: (errors: readonly string[], input: I) => string,
     decoder: T.Decoder<I, O>
   ) =>
   (input: I): E.Either<Error, O> =>
@@ -148,146 +225,282 @@ const decode =
       input,
       decoder.decode,
       mapValidationError,
-      E.mapLeft((errors) => new AggregateError(errors, message(errors)))
+      E.mapLeft((errors) => new AggregateError(errors, message(errors, input)))
     );
 
-// eslint-disable-next-line functional/no-class
-export class JiraProjectService {
-  // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-  constructor(private readonly client: JiraAPI) {}
+export type Environment = ProgressReporterEnv & ClientEnv;
 
-  readonly getProject = (
-    projectKey: string
-  ): TE.TaskEither<Error | JiraErrorResponse, O.Option<Project>> => {
-    return pipe(
-      // eslint-disable-next-line functional/no-this-expression
-      this.client,
-      // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-      makeRequest((client) => client.getProject(projectKey)),
-      TE.chainEitherKW(
-        decode(
-          // eslint-disable-next-line functional/functional-parameters
-          () => `Failed to decode project response for [${projectKey}].`,
-          JiraProject.asDecoder()
+export const getProject = (
+  projectKey: string
+): RTE.ReaderTaskEither<
+  Environment,
+  Error | JiraErrorResponse,
+  O.Option<Project>
+> => {
+  return pipe(
+    progressify<Environment, Error, JiraProject>(
+      'Fetching project',
+      pipe(
+        // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types, functional/no-this-expression
+        makeRequest((client) => client.getProject(projectKey)),
+        RTE.chainEitherKW(
+          decode(
+            (_errors, undecodable) =>
+              `Failed to project response for [${projectKey}] [${JSON.stringify(
+                undecodable,
+                null,
+                2
+              )}].`,
+            JiraProject.asDecoder()
+          )
+        ),
+        // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+        RTE.mapLeft((error) =>
+          JiraErrorResponse.is(error)
+            ? error.errorMessages.some((errorMessage) =>
+                errorMessage.startsWith('No project could be found with')
+              )
+              ? new ProjectNotFound(
+                  `Project [${projectKey}] does not exist.`,
+                  projectKey,
+                  chainableError(error)
+                )
+              : new Error(
+                  `Unknown error while retrieving project [${projectKey}].`,
+                  chainableError(error)
+                )
+            : error
         )
-      ),
-      // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-      TE.mapLeft((error) =>
-        JiraErrorResponse.is(error)
-          ? error.errorMessages.some((errorMessage) =>
-              errorMessage.startsWith('No project could be found with')
+      )
+    ),
+    RTE.chain((project) => {
+      return pipe(
+        progressify<
+          Environment,
+          Error | JiraErrorResponse,
+          readonly JiraProjectRoleDetails[]
+          // eslint-disable-next-line functional/no-this-expression
+        >('Fetching project roles', getProjectRoles(project.key)),
+        RTE.map((roles) => {
+          const groupRoles: readonly ProjectGroupRole[] = roles
+            .filter((role) =>
+              role.actors.some((actor) => JiraActorGroupRole.is(actor))
             )
-            ? new ProjectNotFound(
-                `Project [${projectKey}] does not exist.`,
-                projectKey,
-                chainableError(error)
-              )
-            : new Error(
-                `Unknown error while retrieving project [${projectKey}].`,
-                chainableError(error)
-              )
-          : error
-      ),
-      TE.chain((project) => {
-        return pipe(
-          // eslint-disable-next-line functional/no-this-expression
-          this.getProjectRoles(project.key),
-          TE.map((roles) => {
-            const groupRoles: readonly ProjectGroupRole[] = roles
-              .filter((role) =>
-                role.actors.some((actor) => JiraActorGroupRole.is(actor))
-              )
-              .map((role) => {
-                const actorGroupRoles: readonly JiraActorGroupRole[] =
-                  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
-                  role.actors.filter((actor) =>
-                    JiraActorGroupRole.is(actor)
-                  ) as readonly JiraActorGroupRole[];
+            .map((role) => {
+              const actorGroupRoles: readonly JiraActorGroupRole[] =
+                // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+                role.actors.filter((actor) =>
+                  JiraActorGroupRole.is(actor)
+                ) as readonly JiraActorGroupRole[];
 
-                return {
-                  role: role.name,
-                  groups: actorGroupRoles.map((group) => group.actorGroup),
-                };
-              });
+              return {
+                role: role.name,
+                groups: actorGroupRoles.map((group) => group.actorGroup),
+              };
+            });
 
-            const augmentProject: Project = {
-              ...project,
-              groupRoles,
-            };
+          const augmentProject: Project = {
+            ...project,
+            groupRoles,
+          };
 
-            return augmentProject;
-          })
-        );
-      }),
-      TE.map(O.some),
-      // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-      TE.orElseW((error) => {
-        return error instanceof ProjectNotFound
-          ? TE.right(O.none)
-          : TE.left(error);
-      })
-    );
-  };
+          return augmentProject;
+        })
+      );
+    }),
 
-  readonly getProjectRoleDetails = (projectKey: string, roleId: number) => {
-    const path = `/project/${projectKey}/role/${roleId}`;
-    return pipe(
-      // eslint-disable-next-line functional/no-this-expression
-      this.client,
-      // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-      makeRequest((client) => client.genericGet(path)),
-      TE.chainEitherKW(
-        decode(
-          // eslint-disable-next-line functional/functional-parameters
-          () =>
-            `Failed to decode project role response for project [${projectKey}] and role [${roleId}] at path [${path}]`,
-          JiraProjectRoleDetails.asDecoder()
-        )
-      )
-    );
-  };
-
-  readonly getProjectRoles = (projectKey: string) => {
-    const path = `/project/${projectKey}/roledetails`;
-    return pipe(
-      // eslint-disable-next-line functional/no-this-expression
-      this.client,
-      // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-      makeRequest((client) => client.genericGet(path)),
-      TE.chainEitherKW(
-        decode(
-          // eslint-disable-next-line functional/functional-parameters
-          () =>
-            `Failed to decode project roles response for [${projectKey}] at path [${path}].`,
-          JiraProjectRoles.asDecoder()
-        )
-      ),
-      TE.chain(
-        TE.traverseSeqArray((role) =>
-          // eslint-disable-next-line functional/no-this-expression
-          this.getProjectRoleDetails(projectKey, role.id)
-        )
-      )
-    );
-  };
-
-  readonly projectGroups = (clientCode: string): readonly string[] =>
-    ['developers', 'business', 'administrators'].map((suffix) =>
-      `${clientCode}-${suffix}`.toLowerCase()
-    );
-
-  readonly rolesForGroup = (group: string): readonly string[] =>
-    group.endsWith('-developers')
-      ? ['Team Member']
-      : group.endsWith('-business')
-      ? ['Business Owner']
-      : group.endsWith('-administrators')
-      ? ['Administrators']
-      : [];
-}
-
-export type ProjectService = {
-  readonly getProject: JiraProjectService['getProject'];
-  readonly projectGroups: JiraProjectService['projectGroups'];
-  readonly rolesForGroup: JiraProjectService['rolesForGroup'];
+    RTE.map(O.some),
+    // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+    RTE.orElseW((error) => {
+      return error instanceof ProjectNotFound
+        ? RTE.right(O.none)
+        : RTE.left(error);
+    })
+  );
 };
+
+const getProjectRoleDetails = (
+  projectKey: string,
+  roleId: number
+): RTE.ReaderTaskEither<
+  Environment,
+  Error | JiraErrorResponse,
+  JiraProjectRoleDetails
+> => {
+  const path = `/project/${projectKey}/role/${roleId}`;
+  return pipe(
+    // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+    makeRequest((client) => client.genericGet(path)),
+    RTE.chainEitherKW(
+      decode(
+        // eslint-disable-next-line functional/functional-parameters
+        () =>
+          `Failed to decode project role response for project [${projectKey}] and role [${roleId}] at path [${path}]`,
+        JiraProjectRoleDetails.asDecoder()
+      )
+    )
+  );
+};
+
+const getProjectRoles = (
+  projectKey: string
+): RTE.ReaderTaskEither<
+  Environment,
+  Error | JiraErrorResponse,
+  readonly JiraProjectRoleDetails[]
+> => {
+  const path = `/project/${projectKey}/roledetails`;
+  return pipe(
+    // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+    makeRequest((client) => client.genericGet(path)),
+    RTE.chainEitherKW(
+      decode(
+        // eslint-disable-next-line functional/functional-parameters
+        () =>
+          `Failed to decode project roles response for [${projectKey}] at path [${path}].`,
+        JiraProjectRoles.asDecoder()
+      )
+    ),
+    RTE.chain(
+      RTE.traverseSeqArray((role) =>
+        progressify<
+          Environment,
+          Error | JiraErrorResponse,
+          JiraProjectRoleDetails
+        >(
+          `Getting role ${role.name}`,
+          // eslint-disable-next-line functional/no-this-expression
+          getProjectRoleDetails(projectKey, role.id)
+        )
+      )
+    )
+  );
+};
+
+export const getProjectBoards = (
+  projectKey: string
+): RTE.ReaderTaskEither<
+  Environment,
+  Error | JiraErrorResponse,
+  readonly ProjectBoard[]
+> => {
+  return progressify<
+    Environment,
+    Error | JiraErrorResponse,
+    readonly ProjectBoard[]
+  >(
+    'Getting boards for project',
+    pipe(
+      // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+      makeRequest((client) =>
+        client.getAllBoards(0, 10, 'kanban', undefined, projectKey)
+      ),
+      RTE.chainEitherKW(
+        decode(
+          // eslint-disable-next-line functional/functional-parameters
+          (_errors, undecodable) =>
+            `Failed to decode board response for [${projectKey}] [${JSON.stringify(
+              undecodable,
+              null,
+              2
+            )}].`,
+          BoardSummaryResponse.asDecoder()
+        )
+      ),
+      RTE.map((boardSummaryResponse) => boardSummaryResponse.values),
+      RTE.chain(
+        RTE.traverseSeqArray((boardSummary) =>
+          // eslint-disable-next-line functional/no-this-expression
+          getBoardConfiguration(boardSummary.id)
+        )
+      )
+    )
+  );
+};
+
+const getBoardConfiguration = (
+  boardId: number
+): RTE.ReaderTaskEither<Environment, Error | JiraErrorResponse, ProjectBoard> =>
+  progressify<Environment, Error | JiraErrorResponse, ProjectBoard>(
+    `Getting board configuration ${boardId}`,
+    pipe(
+      // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+      makeRequest((client) => client.getConfiguration(`${boardId}`)), // Jira SDK expects a string, but API returns a number.
+      RTE.chainEitherKW(
+        decode(
+          // eslint-disable-next-line functional/functional-parameters
+          (_errors, undecodable) =>
+            `Failed to decode board configuration for [${boardId}] [${JSON.stringify(
+              undecodable,
+              null,
+              2
+            )}].`,
+          BoardConfiguration.asDecoder()
+        )
+      ),
+      RTE.chain((boardConfiguration) =>
+        pipe(
+          // eslint-disable-next-line functional/no-this-expression
+          getFilterForBoard(boardConfiguration),
+          RTE.map((maybeFilter) => ({
+            id: boardConfiguration.id,
+            name: boardConfiguration.name,
+            type: boardConfiguration.type,
+            filter: O.toUndefined(maybeFilter),
+          }))
+        )
+      )
+    )
+  );
+
+const getFilterForBoard = (
+  boardConfiguration: BoardConfiguration
+): RTE.ReaderTaskEither<
+  Environment,
+  Error | JiraErrorResponse,
+  O.Option<FilterConfiguration>
+> =>
+  boardConfiguration.filter.id !== undefined
+    ? // eslint-disable-next-line functional/no-this-expression
+      pipe(getFilter(boardConfiguration.filter.id), RTE.map(O.some))
+    : RTE.right(O.none);
+
+const getFilter = (
+  filterId: string
+): RTE.ReaderTaskEither<
+  Environment,
+  Error | JiraErrorResponse,
+  FilterConfiguration
+> =>
+  progressify<Environment, Error | JiraErrorResponse, FilterConfiguration>(
+    `Getting filter configuration ${filterId}`,
+    pipe(
+      // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+      makeRequest((client) => client.genericGet(`/filter/${filterId}`)),
+      RTE.chainEitherKW(
+        decode(
+          (_errors, undecodable) =>
+            `Failed to decode filter configuration for [${filterId}] [${JSON.stringify(
+              undecodable,
+              null,
+              2
+            )}].`,
+          FilterConfiguration.asDecoder()
+        )
+      )
+    )
+  );
+
+export const projectGroups = (clientCode: string): readonly string[] =>
+  ['developers', 'business', 'administrators'].map((suffix) =>
+    `${clientCode}-${suffix}`.toLowerCase()
+  );
+
+export const rolesForGroup = (group: string): readonly string[] =>
+  group.endsWith('-developers')
+    ? ['Team Member']
+    : group.endsWith('-business')
+    ? ['Business Owner']
+    : group.endsWith('-administrators')
+    ? ['Administrators']
+    : [];

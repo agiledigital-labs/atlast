@@ -1,9 +1,14 @@
 import JiraAPI from 'jira-client';
-import * as TE from 'fp-ts/lib/TaskEither';
-import * as E from 'fp-ts/lib/Either';
+import * as TE from 'fp-ts/TaskEither';
+import * as RTE from 'fp-ts/ReaderTaskEither';
+import * as E from 'fp-ts/Either';
 import * as T from 'io-ts';
-import { identity, pipe } from 'fp-ts/lib/function';
+import { identity, pipe } from 'fp-ts/function';
 import { chainableError } from './error-service';
+
+export type ClientEnv = {
+  readonly client: JiraAPI;
+};
 
 export const JiraErrorResponse = T.type({
   errorMessages: T.readonlyArray(T.string),
@@ -31,21 +36,24 @@ export const jiraClient = (jiraConfiguration: JiraConfiguration) =>
     strictSSL: true,
   });
 
-export const makeRequest =
-  (
-    f: (
-      // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-      jiraClient: JiraAPI
-    ) => Promise<JiraAPI.JsonResponse>
-  ) =>
-  (
+export const makeRequest = (
+  f: (
     // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
     jiraClient: JiraAPI
-  ): TE.TaskEither<Error | JiraErrorResponse, JiraAPI.JsonResponse> => {
-    return pipe(
+  ) => Promise<JiraAPI.JsonResponse>
+): RTE.ReaderTaskEither<
+  ClientEnv,
+  Error | JiraErrorResponse,
+  JiraAPI.JsonResponse
+> =>
+  pipe(
+    // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+    RTE.asks<ClientEnv, JiraAPI>((env) => env.client),
+    // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+    RTE.chainTaskEitherKW((client) =>
       TE.tryCatch(
         // eslint-disable-next-line functional/functional-parameters
-        () => f(jiraClient),
+        () => f(client),
         (error: unknown) => {
           const maybeJson =
             error instanceof Error
@@ -73,5 +81,5 @@ export const makeRequest =
           );
         }
       )
-    );
-  };
+    )
+  );

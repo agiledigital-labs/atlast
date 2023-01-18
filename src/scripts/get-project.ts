@@ -1,23 +1,28 @@
 import { Argv } from 'yargs';
 import { RootCommand } from '..';
 
-import * as TE from 'fp-ts/lib/TaskEither';
-import * as E from 'fp-ts/lib/Either';
-import * as O from 'fp-ts/lib/Option';
-import { pipe } from 'fp-ts/lib/function';
-import * as Console from 'fp-ts/lib/Console';
+import * as RTE from 'fp-ts/ReaderTaskEither';
+import * as E from 'fp-ts/Either';
+import * as O from 'fp-ts/Option';
+import { pipe } from 'fp-ts/function';
+import * as Console from 'fp-ts/Console';
 import { jiraClient } from './services/client-service';
 import {
-  JiraProjectService,
+  Filter,
   Project,
-  ProjectService,
+  ProjectBoard,
+  rolesForGroup,
+  projectGroups,
+  getProject,
+  getProjectBoards,
 } from './services/project-service';
 import { chainableError } from './services/error-service';
-import * as NEA from 'fp-ts/lib/NonEmptyArray';
-import * as Ap from 'fp-ts/lib/Apply';
+import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
+import * as Ap from 'fp-ts/Apply';
+import { OraProgressReporter } from './services/progress-service';
 
 const applicativeValidation = E.getApplicativeValidation(
-  NEA.getSemigroup<string>()
+  RNEA.getSemigroup<string>()
 );
 
 const difference = <A>(
@@ -31,15 +36,14 @@ const difference = <A>(
 };
 
 const validatedGroup = (
-  service: ProjectService,
   project: Project,
   group: string
-): E.Either<NEA.NonEmptyArray<string>, string> => {
+): E.Either<RNEA.ReadonlyNonEmptyArray<string>, string> => {
   const hasGroup = project.groupRoles.some((groupRole) =>
     groupRole.groups.some((g) => g.displayName === group)
   )
     ? E.right(group)
-    : E.left(NEA.of(`Project does not have required group [${group}].`));
+    : E.left(RNEA.of(`Project does not have required group [${group}].`));
 
   const actualRoles: readonly unknown[] = project.groupRoles
     .filter((groupRole) =>
@@ -47,18 +51,18 @@ const validatedGroup = (
     )
     .map((groupRole) => groupRole.role);
 
-  const expectedRoles = service.rolesForGroup(group);
+  const expectedRoles = rolesForGroup(group);
 
   const [extraRoles, missingRoles] = difference(actualRoles, expectedRoles);
 
   const hasNoMissingRoles =
     missingRoles.length === 0
       ? E.right(group)
-      : E.left(NEA.of(`Missing roles [${missingRoles.join(', ')}]`));
+      : E.left(RNEA.of(`Missing roles [${missingRoles.join(', ')}]`));
   const hasNoExtraRoles =
     extraRoles.length === 0
       ? E.right(group)
-      : E.left(NEA.of(`Extra roles [${extraRoles.join(', ')}]`));
+      : E.left(RNEA.of(`Extra roles [${extraRoles.join(', ')}]`));
 
   return pipe(
     hasGroup,
@@ -71,12 +75,31 @@ const validatedGroup = (
   );
 };
 
-const projectSummary = (
-  service: ProjectService,
+const validatedFilter = (
   project: Project,
+  board: ProjectBoard
+): E.Either<RNEA.ReadonlyNonEmptyArray<string>, Filter> => {
+  const hasFilter =
+    board.filter !== undefined
+      ? E.right(board.filter)
+      : E.left(RNEA.of('Project board does not have a filter.'));
+
+  const filterHasPermissions = (filter: Filter) =>
+    filter.sharePermissions.some(
+      (permission) => permission.project.id === project.id
+    )
+      ? E.right(filter)
+      : E.left(RNEA.of('Filter is not shared with project.'));
+
+  return pipe(hasFilter, E.chain(filterHasPermissions));
+};
+
+const projectSummary = (
+  project: Project,
+  boards: readonly ProjectBoard[],
   clientCode: string
 ) => {
-  const groups = service.projectGroups(clientCode);
+  const groups = projectGroups(clientCode);
 
   const groupRoles = groups
     .map((expectedGroup) => {
@@ -87,13 +110,29 @@ const projectSummary = (
         .map((groupRole) => groupRole.role)
         .join();
 
-      const valid = validatedGroup(service, project, expectedGroup);
+      const validated = validatedGroup(project, expectedGroup);
 
-      const validMessage = E.isLeft(valid)
-        ? `❌ (${valid.left.join(', ')})`
+      const validMessage = E.isLeft(validated)
+        ? `❌ (${validated.left.join(', ')})`
         : '✅';
 
       return `${expectedGroup}: [${roles}] ${validMessage}`;
+    })
+    .map((s) => `  ${s}`)
+    .join('\n');
+
+  const validatedBoards = boards
+    .map((board) => {
+      const validMessage = pipe(
+        validatedFilter(project, board),
+
+        E.fold(
+          (errors) => `❌ (${errors.join(', ')})`,
+          (filter) => `✅\n      jql: ${filter.jql}`
+        )
+      );
+
+      return `${board.name}:\n    type: ${board.type}\n    filter: ${validMessage}`;
     })
     .map((s) => `  ${s}`)
     .join('\n');
@@ -104,19 +143,20 @@ key: ${project.key}
 lead: ${project.lead.displayName}
 groups:
 ${groupRoles}
+boards:
+${validatedBoards}
   `;
   return Console.info(summary);
 };
 
-const project = (
-  service: ProjectService,
-  projectKey: string,
-  clientCode: string,
-  verbose: boolean
-) =>
+const project = (projectKey: string, clientCode: string, verbose: boolean) =>
   pipe(
-    service.getProject(projectKey),
-    TE.chainFirstIOK((maybeProject) =>
+    Ap.sequenceT(RTE.ApplyPar)(
+      getProject(projectKey),
+      getProjectBoards(projectKey)
+    ),
+    // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+    RTE.chainFirstIOK(([maybeProject, boards]) =>
       pipe(
         maybeProject,
         O.fold(
@@ -127,8 +167,8 @@ const project = (
             ),
           (project) =>
             verbose
-              ? Console.info(JSON.stringify(project, null, 2))
-              : projectSummary(service, project, clientCode)
+              ? Console.info(JSON.stringify(boards, null, 2))
+              : projectSummary(project, boards, clientCode)
         )
       )
     )
@@ -179,14 +219,17 @@ export default (
       readonly verbose: boolean;
     }) => {
       const client = jiraClient({ ...args });
-      const projectService = new JiraProjectService(client);
+
+      const env = {
+        client,
+        progressReporter: OraProgressReporter,
+      };
 
       const result = await project(
-        projectService,
         args.projectKey,
         args.clientCode,
         args.verbose
-      )();
+      )(env)();
 
       // eslint-disable-next-line functional/no-conditional-statement
       if (E.isLeft(result)) {

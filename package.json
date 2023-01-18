@@ -19,6 +19,7 @@
     "@types/node-fetch": "^2.6.2",
     "fp-ts": "^2.13.1",
     "jira-client": "^8.2.2",
+    "ora": "5.4.1",
     "yargs": "^17.6.2"
   },
   "devDependencies": {
