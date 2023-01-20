@@ -186,8 +186,7 @@ export default (
 }> =>
   rootCommand.command(
     'get-project',
-    // eslint-disable-next-line quotes
-    "Provides a list of all users' ID's, email addresses, display names, and statuses. Allows a specification of a group to list from.",
+    'Fetches details of a Jira project and checks whether the project is configured correctly',
     // eslint-disable-next-line functional/no-return-void, @typescript-eslint/prefer-readonly-parameter-types
     (yargs) => {
       // eslint-disable-next-line functional/no-expression-statement

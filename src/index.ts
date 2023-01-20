@@ -50,7 +50,7 @@ const rootCommand = yargs
   .option('password', {
     type: 'string',
     alias: 'pw',
-    describe: 'Jira Password',
+    describe: 'Jira Password or API token',
     demandOption: true,
   })
   .group(['user-name', 'password'], 'Jira connection settings:')
