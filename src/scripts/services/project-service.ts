@@ -7,7 +7,7 @@ import { PathReporter } from 'io-ts/PathReporter';
 import { pipe } from 'fp-ts/function';
 import { chainableError } from './error-service';
 import { ClientEnv, JiraErrorResponse, makeRequest } from './client-service';
-import { progressify, ProgressReporterEnv } from './progress-service';
+import { withProgress, ProgressReporterEnv } from './progress-service';
 
 const JiraUser = T.readonly(
   T.type({
@@ -229,7 +229,7 @@ export const fetchProject = (
   O.Option<Project>
 > => {
   return pipe(
-    progressify<Environment, Error, JiraProject>(
+    withProgress<Environment, Error, JiraProject>(
       'Fetching project',
       pipe(
         // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types, functional/no-this-expression
@@ -266,7 +266,7 @@ export const fetchProject = (
     ),
     RTE.chain((project) => {
       return pipe(
-        progressify<
+        withProgress<
           Environment,
           Error | JiraErrorResponse,
           readonly JiraProjectRoleDetails[]
@@ -322,7 +322,7 @@ export const fetchProjectBoards = (
   Error | JiraErrorResponse,
   readonly ProjectBoard[]
 > => {
-  return progressify<
+  return withProgress<
     Environment,
     Error | JiraErrorResponse,
     readonly ProjectBoard[]
@@ -400,7 +400,7 @@ const fetchProjectRoles = (
     ),
     RTE.chain(
       RTE.traverseSeqArray((role) =>
-        progressify<
+        withProgress<
           Environment,
           Error | JiraErrorResponse,
           JiraProjectRoleDetails
@@ -417,7 +417,7 @@ const fetchProjectRoles = (
 const fetchBoardConfiguration = (
   boardId: number
 ): RTE.ReaderTaskEither<Environment, Error | JiraErrorResponse, ProjectBoard> =>
-  progressify<Environment, Error | JiraErrorResponse, ProjectBoard>(
+  withProgress<Environment, Error | JiraErrorResponse, ProjectBoard>(
     `Getting board configuration ${boardId}`,
     pipe(
       // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
@@ -468,7 +468,7 @@ const fetchFilter = (
   Error | JiraErrorResponse,
   FilterConfiguration
 > =>
-  progressify<Environment, Error | JiraErrorResponse, FilterConfiguration>(
+  withProgress<Environment, Error | JiraErrorResponse, FilterConfiguration>(
     `Getting filter configuration ${filterId}`,
     pipe(
       // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types

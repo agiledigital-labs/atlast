@@ -29,7 +29,7 @@ export const OraProgressReporter: ProgressReporter = {
   },
 };
 
-export const progressify = <R extends ProgressReporterEnv, E, A>(
+export const withProgress = <R extends ProgressReporterEnv, E, A>(
   message: string,
   a: RTE.ReaderTaskEither<R, E, A>
 ): RTE.ReaderTaskEither<R, E, A> => {
