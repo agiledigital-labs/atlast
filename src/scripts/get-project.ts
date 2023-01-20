@@ -13,8 +13,8 @@ import {
   ProjectBoard,
   rolesForGroup,
   projectGroups,
-  getProject,
-  getProjectBoards,
+  fetchProject,
+  fetchProjectBoards,
 } from './services/project-service';
 import { chainableError } from './services/error-service';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
@@ -152,8 +152,8 @@ ${validatedBoards}
 const project = (projectKey: string, clientCode: string, verbose: boolean) =>
   pipe(
     Ap.sequenceT(RTE.ApplyPar)(
-      getProject(projectKey),
-      getProjectBoards(projectKey)
+      fetchProject(projectKey),
+      fetchProjectBoards(projectKey)
     ),
     // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
     RTE.chainFirstIOK(([maybeProject, boards]) =>

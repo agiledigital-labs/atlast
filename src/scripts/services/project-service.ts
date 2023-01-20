@@ -186,7 +186,7 @@ export type ProjectBoard = {
 class ProjectNotFound extends Error {
   constructor(
     override readonly message: string,
-    readonly projectKe: string,
+    readonly projectKey: string,
     // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
     options: ErrorOptions
   ) {
@@ -195,42 +195,33 @@ class ProjectNotFound extends Error {
   }
 }
 
-/**
- * Maps the left side of a validation error into a human readable form. Leaves the right as is.
- *
- * @param validation the validation whose left should be mapped.
- * @returns the mapped validation.
- */
-const mapValidationError = <T>(
-  // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-  validation: T.Validation<T>
-): E.Either<readonly string[], T> =>
-  E.isLeft(validation) ? E.left(PathReporter.report(validation)) : validation;
-
-/**
- * Decodes a value using the supplied decoder and maps errors to a readable form.
- *
- * @param name name of the decoded type for reporting.
- * @param input value to be decoded.
- * @param decoder decoder to apply to the value.
- * @returns either a human readable error or the decoded value.
- */
-const decode =
-  <I, O>(
-    message: (errors: readonly string[], input: I) => string,
-    decoder: T.Decoder<I, O>
-  ) =>
-  (input: I): E.Either<Error, O> =>
-    pipe(
-      input,
-      decoder.decode,
-      mapValidationError,
-      E.mapLeft((errors) => new AggregateError(errors, message(errors, input)))
-    );
-
 export type Environment = ProgressReporterEnv & ClientEnv;
 
-export const getProject = (
+/**
+ * The groups that are expected to exist.
+ * @param clientCode client code.
+ * @returns the groups that should exist.
+ */
+export const projectGroups = (clientCode: string): readonly string[] =>
+  ['developers', 'business', 'administrators'].map((suffix) =>
+    `${clientCode}-${suffix}`.toLowerCase()
+  );
+
+/**
+ * The roles that a particular group should be assigned to in the context of a project.
+ * @param group the group to determine the roles for.
+ * @returns the expected role assignments for the specified group.
+ */
+export const rolesForGroup = (group: string): readonly string[] =>
+  group.endsWith('-developers')
+    ? ['Team Member']
+    : group.endsWith('-business')
+    ? ['Business Owner']
+    : group.endsWith('-administrators')
+    ? ['Administrators']
+    : [];
+
+export const fetchProject = (
   projectKey: string
 ): RTE.ReaderTaskEither<
   Environment,
@@ -280,7 +271,7 @@ export const getProject = (
           Error | JiraErrorResponse,
           readonly JiraProjectRoleDetails[]
           // eslint-disable-next-line functional/no-this-expression
-        >('Fetching project roles', getProjectRoles(project.key)),
+        >('Fetching project roles', fetchProjectRoles(project.key)),
         RTE.map((roles) => {
           const groupRoles: readonly ProjectGroupRole[] = roles
             .filter((role) =>
@@ -319,65 +310,12 @@ export const getProject = (
   );
 };
 
-const getProjectRoleDetails = (
-  projectKey: string,
-  roleId: number
-): RTE.ReaderTaskEither<
-  Environment,
-  Error | JiraErrorResponse,
-  JiraProjectRoleDetails
-> => {
-  const path = `/project/${projectKey}/role/${roleId}`;
-  return pipe(
-    // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-    makeRequest((client) => client.genericGet(path)),
-    RTE.chainEitherKW(
-      decode(
-        // eslint-disable-next-line functional/functional-parameters
-        () =>
-          `Failed to decode project role response for project [${projectKey}] and role [${roleId}] at path [${path}]`,
-        JiraProjectRoleDetails.asDecoder()
-      )
-    )
-  );
-};
-
-const getProjectRoles = (
-  projectKey: string
-): RTE.ReaderTaskEither<
-  Environment,
-  Error | JiraErrorResponse,
-  readonly JiraProjectRoleDetails[]
-> => {
-  const path = `/project/${projectKey}/roledetails`;
-  return pipe(
-    // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-    makeRequest((client) => client.genericGet(path)),
-    RTE.chainEitherKW(
-      decode(
-        // eslint-disable-next-line functional/functional-parameters
-        () =>
-          `Failed to decode project roles response for [${projectKey}] at path [${path}].`,
-        JiraProjectRoles.asDecoder()
-      )
-    ),
-    RTE.chain(
-      RTE.traverseSeqArray((role) =>
-        progressify<
-          Environment,
-          Error | JiraErrorResponse,
-          JiraProjectRoleDetails
-        >(
-          `Getting role ${role.name}`,
-          // eslint-disable-next-line functional/no-this-expression
-          getProjectRoleDetails(projectKey, role.id)
-        )
-      )
-    )
-  );
-};
-
-export const getProjectBoards = (
+/**
+ * Fetches the kanban project boards for the specified project.
+ * @param projectKey the key of the project to retrieve.
+ * @returns 
+ */
+export const fetchProjectBoards = (
   projectKey: string
 ): RTE.ReaderTaskEither<
   Environment,
@@ -411,14 +349,72 @@ export const getProjectBoards = (
       RTE.chain(
         RTE.traverseSeqArray((boardSummary) =>
           // eslint-disable-next-line functional/no-this-expression
-          getBoardConfiguration(boardSummary.id)
+          fetchBoardConfiguration(boardSummary.id)
         )
       )
     )
   );
 };
 
-const getBoardConfiguration = (
+const fetchProjectRoleDetails = (
+  projectKey: string,
+  roleId: number
+): RTE.ReaderTaskEither<
+  Environment,
+  Error | JiraErrorResponse,
+  JiraProjectRoleDetails
+> => {
+  const path = `/project/${projectKey}/role/${roleId}`;
+  return pipe(
+    // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+    makeRequest((client) => client.genericGet(path)),
+    RTE.chainEitherKW(
+      decode(
+        // eslint-disable-next-line functional/functional-parameters
+        () =>
+          `Failed to decode project role response for project [${projectKey}] and role [${roleId}] at path [${path}]`,
+        JiraProjectRoleDetails.asDecoder()
+      )
+    )
+  );
+};
+
+const fetchProjectRoles = (
+  projectKey: string
+): RTE.ReaderTaskEither<
+  Environment,
+  Error | JiraErrorResponse,
+  readonly JiraProjectRoleDetails[]
+> => {
+  const path = `/project/${projectKey}/roledetails`;
+  return pipe(
+    // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+    makeRequest((client) => client.genericGet(path)),
+    RTE.chainEitherKW(
+      decode(
+        // eslint-disable-next-line functional/functional-parameters
+        () =>
+          `Failed to decode project roles response for [${projectKey}] at path [${path}].`,
+        JiraProjectRoles.asDecoder()
+      )
+    ),
+    RTE.chain(
+      RTE.traverseSeqArray((role) =>
+        progressify<
+          Environment,
+          Error | JiraErrorResponse,
+          JiraProjectRoleDetails
+        >(
+          `Getting role ${role.name}`,
+          // eslint-disable-next-line functional/no-this-expression
+          fetchProjectRoleDetails(projectKey, role.id)
+        )
+      )
+    )
+  );
+};
+
+const fetchBoardConfiguration = (
   boardId: number
 ): RTE.ReaderTaskEither<Environment, Error | JiraErrorResponse, ProjectBoard> =>
   progressify<Environment, Error | JiraErrorResponse, ProjectBoard>(
@@ -441,7 +437,7 @@ const getBoardConfiguration = (
       RTE.chain((boardConfiguration) =>
         pipe(
           // eslint-disable-next-line functional/no-this-expression
-          getFilterForBoard(boardConfiguration),
+          fetchFilterForBoard(boardConfiguration),
           RTE.map((maybeFilter) => ({
             id: boardConfiguration.id,
             name: boardConfiguration.name,
@@ -453,7 +449,7 @@ const getBoardConfiguration = (
     )
   );
 
-const getFilterForBoard = (
+const fetchFilterForBoard = (
   boardConfiguration: BoardConfiguration
 ): RTE.ReaderTaskEither<
   Environment,
@@ -462,10 +458,10 @@ const getFilterForBoard = (
 > =>
   boardConfiguration.filter.id !== undefined
     ? // eslint-disable-next-line functional/no-this-expression
-      pipe(getFilter(boardConfiguration.filter.id), RTE.map(O.some))
+      pipe(fetchFilter(boardConfiguration.filter.id), RTE.map(O.some))
     : RTE.right(O.none);
 
-const getFilter = (
+const fetchFilter = (
   filterId: string
 ): RTE.ReaderTaskEither<
   Environment,
@@ -491,16 +487,35 @@ const getFilter = (
     )
   );
 
-export const projectGroups = (clientCode: string): readonly string[] =>
-  ['developers', 'business', 'administrators'].map((suffix) =>
-    `${clientCode}-${suffix}`.toLowerCase()
-  );
+/**
+ * Maps the left side of a validation error into a human readable form. Leaves the right as is.
+ *
+ * @param validation the validation whose left should be mapped.
+ * @returns the mapped validation.
+ */
+const mapValidationError = <T>(
+  // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
+  validation: T.Validation<T>
+): E.Either<readonly string[], T> =>
+  E.isLeft(validation) ? E.left(PathReporter.report(validation)) : validation;
 
-export const rolesForGroup = (group: string): readonly string[] =>
-  group.endsWith('-developers')
-    ? ['Team Member']
-    : group.endsWith('-business')
-    ? ['Business Owner']
-    : group.endsWith('-administrators')
-    ? ['Administrators']
-    : [];
+/**
+ * Decodes a value using the supplied decoder and maps errors to a readable form.
+ *
+ * @param message function that will be used to build the error message if decoding fails.
+ * @param decoder decoder to apply to the value.
+ * @param input value to be decoded.
+ * @returns either a human readable error or the decoded value.
+ */
+const decode =
+  <I, O>(
+    message: (errors: readonly string[], input: I) => string,
+    decoder: T.Decoder<I, O>
+  ) =>
+  (input: I): E.Either<Error, O> =>
+    pipe(
+      input,
+      decoder.decode,
+      mapValidationError,
+      E.mapLeft((errors) => new AggregateError(errors, message(errors, input)))
+    );
