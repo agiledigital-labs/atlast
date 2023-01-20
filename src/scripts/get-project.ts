@@ -69,7 +69,8 @@ const validatedGroup = (
     E.chain((group) =>
       pipe(
         Ap.sequenceT(applicativeValidation)(hasNoMissingRoles, hasNoExtraRoles),
-        E.map((_) => group)
+        // eslint-disable-next-line functional/functional-parameters
+        E.map(() => group)
       )
     )
   );

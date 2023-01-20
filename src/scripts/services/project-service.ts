@@ -313,7 +313,7 @@ export const fetchProject = (
 /**
  * Fetches the kanban project boards for the specified project.
  * @param projectKey the key of the project to retrieve.
- * @returns 
+ * @returns the boards that are associated with the project.
  */
 export const fetchProjectBoards = (
   projectKey: string
